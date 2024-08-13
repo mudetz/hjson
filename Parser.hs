@@ -1,131 +1,259 @@
-module Parser where
+module Main where
 
-import Data.Tuple
-import Data.Char
 import Control.Applicative
-import Text.Regex
+import Control.Monad
+import Data.Char
+import Data.List
+import Data.Maybe
 
-data JsonValue
-  = JsonNull
-  | JsonBool Bool
-  | JsonInt Int
-  | JsonFloat Double
+
+-- Type definition
+data JsonPrimitive
+  = JsonWhitespace String
   | JsonString String
-  | JsonArray [JsonValue]
-  | JsonObject [(JsonValue, JsonValue)]
-  deriving (Show, Eq)
+  | JsonNumber String -- TODO: Use numeric type?
+  | JsonObject [(JsonPrimitive, JsonPrimitive)]
+  | JsonArray [JsonPrimitive]
+  | JsonBool Bool
+  | JsonNull
+  deriving (Show)
 
 newtype Parser a = Parser
-  { runParser :: String -> Maybe (String, a)
+  { runParser :: String -> Maybe (a, String)
   }
 
+
+-- Class instancing
 instance Functor Parser where
-  fmap f (Parser p) =
-    Parser $ \input -> do
-      (input', x) <- p input
-      Just (input', f x)
+  fmap f (Parser p)
+    = Parser $ \input -> do
+      (x, inputRemainder) <- p input
+      Just (f x, inputRemainder)
+
 
 instance Applicative Parser where
-  pure x = Parser $ \input -> Just (input, x)
-  (Parser p1) <*> (Parser p2) =
-    Parser $ \input -> do
-      (input', f)  <- p1 input
-      (input'', a) <- p2 input'
-      Just (input'', f a)
+  pure x = Parser $ \input -> Just (x, input)
+  (Parser p1) <*> (Parser p2)
+    = Parser $ \input -> do
+      (f, remainder)  <- p1 input
+      (a, remainder') <- p2 remainder
+      Just (f a, remainder')
+
 
 instance Alternative Parser where
-  empty = Parser $ (\_ -> Nothing)
-  (Parser p1) <|> (Parser p2) = Parser $ \input ->
-    p1 input <|> p2 input
+  empty =  Parser (\_ -> Nothing)
+  (Parser p1) <|> (Parser p2)
+    = Parser $ \input ->
+      p1 input <|> p2 input
 
-jsonNull :: Parser JsonValue
-jsonNull = (\_ -> JsonNull) <$> stringP "null"
 
-jsonBool :: Parser JsonValue
-jsonBool = (\b -> JsonBool (b == "true")) <$> (stringP "true" <|> stringP "false")
-
-jsonFloatRegex :: Regex
-jsonFloatRegex = mkRegex "^-?(0|([1-9][0-9]*))(\\.[0-9]+([eE][+-]?[0-9]+)?)"
-
-jsonIntRegex :: Regex
-jsonIntRegex = mkRegex "^-?(0|([1-9][0-9]*))"
-
-jsonInt :: Parser JsonValue
-jsonInt = f <$> regexP jsonIntRegex
+-- Parsers
+-- Generic
+charParser :: Char -> Parser Char
+charParser c = Parser f
   where
-    f x = JsonInt $ read x
+    f (x:xs)
+      | x == c = Just (x, xs)
+      | otherwise = Nothing
+    f _ = Nothing
 
-jsonFloat :: Parser JsonValue
-jsonFloat = f <$> regexP jsonFloatRegex
+
+escapedCharParser :: Parser Char
+escapedCharParser = Parser f
   where
-    f x = JsonFloat $ read x
+    f ('\\':x:xs)
+      | x == '\'' = Just ('\\', xs)
+      | x == '\\' = Just ('\\', xs)
+      | x == '/'  = Just ('/', xs)
+      | x == 'b'  = Just ('\b', xs)
+      | x == 'n'  = Just ('\n', xs)
+      | x == 'r'  = Just ('\r', xs)
+      | x == 't'  = Just ('\t', xs) -- TODO: Handle "\u" 
+      | otherwise = Nothing
+    f _ = Nothing
 
-jsonNumber :: Parser JsonValue
-jsonNumber = jsonFloat <|> jsonInt
 
-jsonString :: Parser JsonValue
-jsonString = JsonString <$> (charP '"' *> nonQuoteP <* charP '"')
-
-jsonArray :: Parser JsonValue
-jsonArray = JsonArray <$> (charP '[' *> whitespaceP *> elements <* whitespaceP <* charP ']')
-  where
-    elements = sepByP (whitespaceP *> charP ',' <* whitespaceP) jsonValue 
-
-jsonObject :: Parser JsonValue
-jsonObject = JsonObject <$> (charP '{' *> whitespaceP *> pairs <* whitespaceP <* charP '}')
-  where
-    pairs = sepByP (whitespaceP *> charP ',' <* whitespaceP) pair
-    pair = (\a _ b -> (a, b)) <$> jsonPrimitive <*> (whitespaceP *> charP ':' <* whitespaceP) <*> jsonValue
-
-sepByP :: Parser a -> Parser b -> Parser [b]
-sepByP sepP elemP = (:) <$> elemP <*> many (sepP *> elemP) <|> pure []
-
-charP :: Char -> Parser Char
-charP x = Parser f
+elemParser :: String -> Parser Char
+elemParser xs = Parser f
   where
     f (y:ys)
-      | x == y = Just (ys, x)
+      | elem y xs = Just (y, ys)
       | otherwise = Nothing
-    f [] = Nothing
+    f _ = Nothing
 
--- NOTE: Not so sure about this
-nonQuoteP :: Parser String
-nonQuoteP = regexP $ mkRegex "^((\\\\\")|([^\"]))*"
 
-whitespaceP :: Parser String
-whitespaceP = spanP isSpace
+notElemParser :: String -> Parser Char
+notElemParser xs = Parser f
+  where
+    f (y:ys)
+      | notElem y xs = Just (y, ys)
+      | otherwise = Nothing
+    f _ = Nothing
 
-stringP :: String -> Parser String
-stringP = sequenceA . map charP
 
-regexP :: Regex -> Parser String
-regexP p = Parser $ \input ->
-  case matchRegexAll p input of
-    Just ("", xs, ys, _) -> Just (ys, xs)
-    _ -> Nothing
+stringParser :: String -> Parser String
+stringParser = sequenceA . map charParser
 
-spanP :: (Char -> Bool) -> Parser String
-spanP f = Parser $ \input -> Just $ swap $ span f input
 
-jsonPrimitive :: Parser JsonValue
-jsonPrimitive = jsonNull
+negationSignParser :: Parser Char
+negationSignParser = charParser '-'
+
+
+signParser :: Parser Char
+signParser = elemParser "+-"
+
+
+eParser :: Parser Char
+eParser = elemParser "eE"
+
+
+nonZeroDigitParser :: Parser Char
+nonZeroDigitParser = elemParser "123456789"
+
+
+digitParser :: Parser Char
+digitParser = elemParser "0123456789"
+
+
+zeroDigitParser :: Parser Char
+zeroDigitParser = charParser '0'
+
+
+pointParser :: Parser Char
+pointParser = charParser '.'
+
+
+nonZeroIntegerParser :: Parser String
+nonZeroIntegerParser = (:) <$> nonZeroDigitParser <*> many digitParser
+
+
+zeroParser :: Parser String
+zeroParser = singleton <$> zeroDigitParser
+
+
+integerParser :: Parser String
+integerParser = zeroParser <|> nonZeroIntegerParser
+
+
+fractionParser :: Parser String
+fractionParser = (:) <$> pointParser <*> some digitParser
+
+
+exponentParser :: Parser String
+exponentParser = f <$> eParser <*> optional signParser <*> some digitParser
+  where
+    f e sign d = join [singleton e, maybeToList sign, d]
+
+
+numberParser :: Parser String
+numberParser = f <$> optional negationSignParser <*> integerParser <*> optional fractionParser <*> optional exponentParser
+  where
+    f signP intP fracP expP = join [maybeToList signP, intP, fromMaybe "" fracP, fromMaybe "" expP] 
+
+
+
+-- Parsers
+-- JSON
+jsonNull :: Parser JsonPrimitive
+jsonNull = const JsonNull <$> stringParser "null"
+
+
+jsonTrue :: Parser JsonPrimitive
+jsonTrue = const (JsonBool True) <$> stringParser "true"
+
+
+jsonFalse :: Parser JsonPrimitive
+jsonFalse = const (JsonBool False) <$> stringParser "false"
+
+
+jsonBool :: Parser JsonPrimitive
+jsonBool = jsonTrue <|> jsonFalse
+
+
+jsonWhitespace :: Parser JsonPrimitive
+jsonWhitespace = JsonWhitespace <$> some (elemParser " \n\r\t")
+
+
+jsonNumber :: Parser JsonPrimitive
+jsonNumber = JsonNumber <$> numberParser
+
+
+jsonString :: Parser JsonPrimitive
+jsonString = JsonString <$> (bound *> some (notElemParser "\"\\" <|> escapedCharParser) <* bound)
+  where
+    bound = charParser '"'
+
+
+jsonArray :: Parser JsonPrimitive
+jsonArray = JsonArray <$> (open *> optional jsonWhitespace *> elements <* optional jsonWhitespace <* close)
+  where
+    open = charParser '['
+    close = charParser ']'
+    separator = charParser ',' *> optional jsonWhitespace
+    elements = (:) <$> element <*> many (separator *> element)
+           <|> pure []
+    element = jsonNull
+          <|> jsonBool
+          <|> jsonNumber
+          <|> jsonString
+          <|> jsonArray
+          <|> jsonObject
+
+
+jsonObject :: Parser JsonPrimitive
+jsonObject = JsonObject <$> (open *> optional jsonWhitespace *> tuples <* optional jsonWhitespace <* close)
+  where
+    open  = charParser '{'
+    close = charParser '}'
+
+    assignment = optional jsonWhitespace *> charParser ':' <* optional jsonWhitespace
+    separator  =                            charParser ',' <* optional jsonWhitespace
+
+    tuples = (:) <$> tuple <*> many (separator *> tuple) <|> pure []
+    tuple = (\k _ v -> (k, v)) <$> jsonString <*> assignment <*> jsonValue
+    jsonValue = jsonNull
             <|> jsonBool
             <|> jsonNumber
             <|> jsonString
+            <|> jsonArray
+            <|> jsonObject
 
-jsonValue :: Parser JsonValue
-jsonValue = jsonNull
-        <|> jsonBool
-        <|> jsonNumber
-        <|> jsonString
-        <|> jsonArray
-        <|> jsonObject
+parseJson :: String -> Maybe JsonPrimitive
+parseJson xs = case runParser jsonValue $ reverse $ dropWhile isSpace $ reverse $ dropWhile isSpace xs of
+    Just (jv, "") -> Just jv
+    _             -> Nothing
+  where
+    jsonValue = optional jsonWhitespace
+             *> jsonNull
+            <|> jsonBool
+            <|> jsonNumber
+            <|> jsonString
+            <|> jsonArray
+            <|> jsonObject
+             <* optional jsonWhitespace
 
-parseJson :: String -> Maybe JsonValue
-parseJson x = case runParser jsonValue x of
-  Nothing -> Nothing
-  Just ("", parsed) -> Just parsed
-  _ -> Nothing
 
+-- Print utility
+pretty' :: String -> Int -> JsonPrimitive -> String
+pretty' p t x = padding ++ case x of
+    JsonNull           -> "null"
+    (JsonBool b)       -> map toLower $ show b
+    (JsonNumber n)     -> n
+    (JsonString s)     -> "\"" ++ s ++ "\""
+    (JsonWhitespace w) -> w
+    (JsonArray a)      -> "[\n" ++ (intercalate ",\n" $ map (pretty' p (t + 1)) a) ++ "\n" ++ padding ++ "]"
+    (JsonObject o)     -> "{\n" ++ (intercalate ",\n" $ map tupleToStr o)      ++ "\n" ++ padding ++  "}"
+  where
+    tupleToStr (k, v) = pretty' p (t + 1) k ++ ": " ++ pretty' p 0 v
+    padding = concat $ replicate t p
+
+
+pretty :: JsonPrimitive -> String
+pretty = pretty' "  " 0
+
+
+-- main
 main :: IO ()
-main = undefined
+main = do
+  json <- readFile "test.json"
+  putStrLn $ pretty $ fromMaybe JsonNull $ parseJson json
